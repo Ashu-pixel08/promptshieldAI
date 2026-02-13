@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 PromptShield Full-Stack Agent
 =============================
 
@@ -64,3 +65,6 @@ By default the frontend talks to `http://localhost:5000/api`. You can change thi
 - `GET /api/records` — list all stored records (for cards)
 - `POST /api/records` — create a new record by sending user input; backend calls `ANALYZE_URL`, stores the result, and returns the created row
 
+=======
+# promptshieldAI
+>>>>>>> 26d223f20d04bb6068b7c53868b847600b7443cc

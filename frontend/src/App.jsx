@@ -1,315 +1,27 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { fetchRecords, createRecord } from "./api";
 
-function computeRisk(record) {
-  const analysisText = (record && record.analysis) || "";
-  const promptText = (record && record.user_input) || "";
-
-  // 1) Prefer backend JSON output from the context-aware analyzer.
-  if (analysisText && analysisText.trim()) {
-    try {
-      const parsed = JSON.parse(analysisText);
-      if (parsed && typeof parsed.threatScore === "number") {
-        const score = Math.max(0, Math.min(10, parsed.threatScore));
-        let level = parsed.threatLevel || "SAFE";
-        if (!["SAFE", "MEDIUM", "HIGH"].includes(level)) {
-          if (score === 0) level = "SAFE";
-          else if (score <= 4) level = "MEDIUM";
-          else level = "HIGH";
-        }
-        return { score, level };
-      }
-    } catch {
-      // If analysis isn't JSON, fall through to local heuristic logic.
-    }
+// Extract analysis data from backend response
+function getAnalysisData(record) {
+  if (!record) return null;
+  
+  // Backend returns analysis as object (not string)
+  const analysis = record.analysis;
+  
+  if (!analysis || typeof analysis !== "object") {
+    return null;
   }
-
-  // 2) If backend didn't return structured JSON (older rows or error),
-  // run a lightweight version of the same context-aware logic directly
-  // on the original prompt text so the UI still behaves intelligently.
-  if (!promptText || !promptText.trim()) {
-    return { score: 0, level: "SAFE" };
-  }
-
-  const lower = promptText.toLowerCase();
-  const normalized = lower
-    .replace(/[^\w\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!normalized) {
-    return { score: 0, level: "SAFE" };
-  }
-
-  const tokens = normalized.split(" ").filter(Boolean);
-
-  const hasIntentPhrase =
-    normalized.includes("how to") ||
-    normalized.includes("ways to") ||
-    normalized.includes("method to");
-
-  const riskyActions = [
-    "kill",
-    "hack",
-    "bypass",
-    "override",
-    "reveal",
-    "disable",
-    "steal",
-    "access",
-  ];
-
-  const sensitiveTargets = [
-    "human",
-    "person",
-    "people",
-    "user",
-    "users",
-    "system",
-    "database",
-    "password",
-    "account",
-    "server",
-    "ai",
-    "individual",
-    "someone",
-    "anyone",
-    "backend",
-  ];
-
-  const safeTargets = [
-    "virus",
-    "bug",
-    "malware",
-    "error",
-    "issue",
-    "file",
-    "trojan",
-    "worm",
-    "glitch",
-  ];
-
-  const actionIndices = [];
-  const sensitiveIndices = [];
-  const safeIndices = [];
-
-  tokens.forEach((token, idx) => {
-    if (riskyActions.includes(token)) {
-      actionIndices.push({ word: token, idx });
-    }
-    if (sensitiveTargets.includes(token)) {
-      sensitiveIndices.push({ word: token, idx });
-    }
-    if (safeTargets.includes(token)) {
-      safeIndices.push({ word: token, idx });
-    }
-  });
-
-  let score = 0;
-  const usedActionIdx = new Set();
-  const usedTargetIdx = new Set();
-
-  const MAX_DISTANCE = 3;
-
-  // Dangerous action + sensitive target -> +5
-  actionIndices.forEach((a) => {
-    sensitiveIndices.forEach((t) => {
-      if (
-        Math.abs(a.idx - t.idx) <= MAX_DISTANCE &&
-        !usedActionIdx.has(a.idx) &&
-        !usedTargetIdx.has(t.idx)
-      ) {
-        usedActionIdx.add(a.idx);
-        usedTargetIdx.add(t.idx);
-        score += 5;
-      }
-    });
-  });
-
-  // Dangerous action + safe target -> +1
-  actionIndices.forEach((a) => {
-    safeIndices.forEach((t) => {
-      if (
-        Math.abs(a.idx - t.idx) <= MAX_DISTANCE &&
-        !usedActionIdx.has(a.idx) &&
-        !usedTargetIdx.has(t.idx)
-      ) {
-        usedActionIdx.add(a.idx);
-        usedTargetIdx.add(t.idx);
-        score += 1;
-      }
-    });
-  });
-
-  // Remaining actions -> +2
-  actionIndices.forEach((a) => {
-    if (!usedActionIdx.has(a.idx)) {
-      usedActionIdx.add(a.idx);
-      score += 2;
-    }
-  });
-
-  // Intent phrases + any risky combo -> +2
-  if (hasIntentPhrase && score > 0) {
-    score += 2;
-  }
-
-  if (score > 10) score = 10;
-
-  let level = "SAFE";
-  if (score === 0) {
-    level = "SAFE";
-  } else if (score <= 4) {
-    level = "MEDIUM";
-  } else {
-    level = "HIGH";
-  }
-
-  return { score, level };
-}
-
-function summarizeAnalysis(analysisText) {
-  if (!analysisText || !analysisText.trim()) {
-    return "No scan performed yet. Submit a prompt to view analysis.";
-  }
-  const trimmed = analysisText.trim().replace(/\s+/g, " ");
-  if (trimmed.length <= 200) return trimmed;
-  return `${trimmed.slice(0, 200)}…`;
-}
-
-function getKeywords(analysisText) {
-  const text = (analysisText || "").toLowerCase();
-  const keywords = [];
-  if (text.includes("ignore previous instructions")) {
-    keywords.push("Ignore previous instructions");
-  }
-  if (text.includes("system prompt")) {
-    keywords.push("System prompt access");
-  }
-  if (text.includes("override")) {
-    keywords.push("Override protections");
-  }
-  if (text.includes("prompt injection")) {
-    keywords.push("Prompt injection");
-  }
-  return keywords;
-}
-
-function getPatterns(analysisText) {
-  const text = (analysisText || "").toLowerCase();
-  const patterns = [];
-  if (text.includes("chain-of-thought") || text.includes("cot")) {
-    patterns.push("Chain-of-thought leakage");
-  }
-  if (text.includes("api key") || text.includes("secrets")) {
-    patterns.push("Secret exfiltration");
-  }
-  if (text.includes("ignore safety") || text.includes("disable safety")) {
-    patterns.push("Safety override attempt");
-  }
-  return patterns;
-}
-
-function explainThreat(score, level, keywords, patterns, analysisText) {
-  // Prefer the backend's structured explanation when available.
-  try {
-    const parsed = JSON.parse(analysisText);
-    if (parsed && typeof parsed.threatScore === "number") {
-      const summary =
-        parsed.explanation ||
-        "The context-aware engine analyzed this prompt and produced a risk score.";
-
-      const recs = [];
-
-      const lvl = parsed.threatLevel || level;
-      recs.push(
-        `Overall threat level is ${lvl} with score ${parsed.threatScore} on a 0–10 scale.`
-      );
-
-      if (Array.isArray(parsed.detectedActions) && parsed.detectedActions.length) {
-        recs.push(
-          `Detected risky actions: ${parsed.detectedActions.join(", ")}.`
-        );
-      }
-      if (Array.isArray(parsed.detectedTargets) && parsed.detectedTargets.length) {
-        recs.push(
-          `Detected targets in context: ${parsed.detectedTargets.join(", ")}.`
-        );
-      }
-      if (parsed.confidence) {
-        recs.push(`Model confidence in this assessment is ${parsed.confidence}.`);
-      }
-      if (recs.length === 1) {
-        recs.push(
-          "Review this prompt in your own threat model to confirm whether the assessment aligns with your expectations."
-        );
-      }
-
-      return {
-        summary,
-        recommendations: recs,
-      };
-    }
-  } catch {
-    // If not JSON, fall back to the original heuristic narrative below.
-  }
-
-  const hasSignals = (keywords && keywords.length) || (patterns && patterns.length);
-  const clean = (analysisText || "").trim();
-
-  if (!clean) {
-    return {
-      summary:
-        "No threat signals yet. Once you submit a prompt, this panel will explain how risky it is and why.",
-      recommendations: [
-        "Paste a real user or system prompt that your pipeline might see.",
-        "Use examples that try to override instructions, exfiltrate secrets, or bypass safety rules.",
-      ],
-    };
-  }
-
-  if (level === "HIGH") {
-    return {
-      summary:
-        "This prompt looks like a strong prompt-injection attempt. It is actively trying to override existing instructions or access hidden system information. Treat it as unsafe and never forward it directly to an LLM without a strong defense layer in between.",
-      recommendations: [
-        "Block this prompt or send it to a manual review queue instead of executing it automatically.",
-        "Strip or rewrite segments that try to override previous instructions or reveal system prompts.",
-        "Log this event with full context so you can tune detection rules or fine‑tune future models.",
-      ],
-    };
-  }
-
-  if (level === "MEDIUM") {
-    return {
-      summary:
-        "This prompt contains patterns that frequently show up in injection or jailbreak attempts. It might be benign, but there is enough risk that you should treat it with caution.",
-      recommendations: [
-        "Avoid giving this prompt full control over tools, file systems, or private data.",
-        "Apply stricter output filters or a second review model before executing actions.",
-        "Consider sanitizing or rewriting suspicious segments while preserving the user’s intent.",
-      ],
-    };
-  }
-
-  // SAFE but possibly with some signals
-  if (hasSignals) {
-    return {
-      summary:
-        "The prompt contains some patterns that can appear in attacks, but overall risk looks low. Continue to monitor, especially if this pattern appears frequently in your logs.",
-      recommendations: [
-        "Allow the prompt, but keep telemetry enabled so you can spot regressions.",
-        "Use this example as a candidate when you evaluate future guardrail models.",
-      ],
-    };
-  }
-
+  
   return {
-    summary:
-      "The prompt looks safe based on current heuristics. No strong override, exfiltration, or jailbreak patterns were detected.",
-    recommendations: [
-      "You can usually allow this prompt, but keep guardrails active in case downstream models behave unexpectedly.",
-    ],
+    threatScore: analysis.threatScore ?? 0,
+    threatLevel: analysis.threatLevel || "SAFE",
+    detectedActions: analysis.detectedActions || [],
+    detectedTargets: analysis.detectedTargets || [],
+    mlPrediction: analysis.mlPrediction || "SAFE",
+    mlConfidence: analysis.mlConfidence ?? 0,
+    confidence: analysis.confidence || "low",
+    explanation: analysis.explanation || "",
+    detectionMethod: analysis.detectionMethod || "Keyword + Machine Learning",
   };
 }
 
@@ -327,9 +39,20 @@ function App() {
     async function load() {
       try {
         const data = await fetchRecords();
-        setRecords(data);
-        if (data.length > 0) {
-          setActiveRecordId(data[0].id);
+        // Backend may return analysis as string (from DB), parse if needed
+        const parsedData = data.map(record => {
+          if (record.analysis && typeof record.analysis === "string") {
+            try {
+              record.analysis = JSON.parse(record.analysis);
+            } catch {
+              record.analysis = null;
+            }
+          }
+          return record;
+        });
+        setRecords(parsedData);
+        if (parsedData.length > 0) {
+          setActiveRecordId(parsedData[0].id);
         }
       } catch (err) {
         console.error(err);
@@ -354,9 +77,14 @@ function App() {
 
     setLoading(true);
     try {
-      const newRecord = await createRecord(trimmed);
-      setRecords((prev) => [newRecord, ...prev]);
-      setActiveRecordId(newRecord.id);
+      const response = await createRecord(trimmed);
+      
+      // Log backend response for debugging
+      console.log("Backend analysis:", response);
+      
+      // Backend returns: { id, prompt, analysis: {...}, created_at }
+      setRecords((prev) => [response, ...prev]);
+      setActiveRecordId(response.id);
       setPrompt("");
     } catch (err) {
       console.error(err);
@@ -371,24 +99,19 @@ function App() {
     [records, activeRecordId]
   );
 
-  const currentAnalysis = activeRecord?.analysis || "";
-  const { score, level } = computeRisk(activeRecord);
+  const analysisData = getAnalysisData(activeRecord);
+  const score = analysisData?.threatScore ?? 0;
+  const level = analysisData?.threatLevel || "SAFE";
   const levelClass =
     level === "HIGH" ? "threat-chip high" : level === "MEDIUM" ? "threat-chip medium" : "threat-chip safe";
-
-  const keywords = getKeywords(currentAnalysis);
-  const patterns = getPatterns(currentAnalysis);
-  const threatNarrative = useMemo(
-    () => explainThreat(score, level, keywords, patterns, currentAnalysis),
-    [score, level, keywords, patterns, currentAnalysis]
-  );
 
   const historyStats = useMemo(() => {
     let safe = 0;
     let medium = 0;
     let high = 0;
     records.forEach((r) => {
-      const { level: l } = computeRisk(r);
+      const data = getAnalysisData(r);
+      const l = data?.threatLevel || "SAFE";
       if (l === "HIGH") high += 1;
       else if (l === "MEDIUM") medium += 1;
       else safe += 1;
@@ -399,7 +122,8 @@ function App() {
   const filteredRecords = useMemo(() => {
     if (filterLevel === "ALL") return records;
     return records.filter((r) => {
-      const { level: l } = computeRisk(r);
+      const data = getAnalysisData(r);
+      const l = data?.threatLevel || "SAFE";
       return l === filterLevel;
     });
   }, [records, filterLevel]);
@@ -474,7 +198,7 @@ function App() {
                 disabled={!activeRecord}
                 onClick={() => {
                   if (!activeRecord) return;
-                  setPrompt(activeRecord.user_input || "");
+                  setPrompt(activeRecord.prompt || "");
                   setError("");
                 }}
               >
@@ -482,8 +206,7 @@ function App() {
               </button>
             </div>
             <p className="console-footnote">
-              Detection engine uses heuristic scoring (0–10), with keyword and
-              pattern analysis.
+              Detection engine uses keyword scoring and machine learning (0–10 scale).
             </p>
           </form>
 
@@ -493,7 +216,7 @@ function App() {
               <div>
                 <h3 className="panel-title">Threat Meter</h3>
                 <p className="panel-subtitle">
-                  Heuristic prompt injection risk score (0–10).
+                  Prompt injection risk score (0–10).
                 </p>
               </div>
             </div>
@@ -520,7 +243,7 @@ function App() {
             <div className="threat-stats-row">
               <div className="threat-stat">
                 <span className="stat-label">Threat Score</span>
-                <span className="stat-value">{score}</span>
+                <span className="stat-value">{score.toFixed(1)}</span>
               </div>
               <div className="threat-stat">
                 <span className="stat-label">Threat Level</span>
@@ -528,7 +251,7 @@ function App() {
               </div>
               <div className="threat-stat">
                 <span className="stat-label">Confidence</span>
-                <span className="stat-value">—</span>
+                <span className="stat-value">{analysisData?.confidence || "—"}</span>
               </div>
             </div>
           </div>
@@ -545,75 +268,79 @@ function App() {
             </div>
           </div>
 
-          <div className="results-section">
-            <h4 className="results-label">Detection Summary</h4>
-            <p className="results-text">
-              {summarizeAnalysis(currentAnalysis)}
-            </p>
-          </div>
-
-          <div className="results-section threat-narrative">
-            <h4 className="results-label">Threat Narrative</h4>
-            <p className="results-text">{threatNarrative.summary}</p>
-          </div>
-
-          <div className="results-section">
-            <h4 className="results-label">Recommended Actions</h4>
-            <ul className="narrative-list">
-              {threatNarrative.recommendations.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="results-section">
-            <div className="results-raw-header">
-              <h4 className="results-label">Raw Analysis Payload</h4>
-              <button
-                type="button"
-                className="results-raw-toggle"
-                onClick={() => setShowRawAnalysis((v) => !v)}
-              >
-                {showRawAnalysis ? "Hide" : "Show"}
-              </button>
-            </div>
-            {showRawAnalysis && (
-              <pre className="results-raw-block">
-                {currentAnalysis || "No analysis available for this scan."}
-              </pre>
-            )}
-          </div>
-
-          <div className="results-grid">
+          {!analysisData ? (
             <div className="results-section">
-              <h4 className="results-label">Keywords Detected</h4>
-              {keywords.length === 0 ? (
-                <p className="results-text muted">No suspicious keywords.</p>
-              ) : (
-                <div className="chip-row">
-                  {keywords.map((k) => (
-                    <span key={k} className="result-chip">
-                      {k}
-                    </span>
-                  ))}
+              <p className="results-text muted">
+                No analysis available. Submit a prompt to view results.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="results-section">
+                <h4 className="results-label">Detection Method</h4>
+                <p className="results-text">{analysisData.detectionMethod}</p>
+              </div>
+
+              <div className="results-section">
+                <h4 className="results-label">ML Prediction</h4>
+                <p className="results-text">
+                  <strong>{analysisData.mlPrediction}</strong> (confidence: {(analysisData.mlConfidence * 100).toFixed(1)}%)
+                </p>
+              </div>
+
+              <div className="results-section">
+                <h4 className="results-label">Explanation</h4>
+                <p className="results-text">{analysisData.explanation || "No explanation provided."}</p>
+              </div>
+
+              {(analysisData.detectedActions?.length > 0 || analysisData.detectedTargets?.length > 0) && (
+                <div className="results-grid">
+                  {analysisData.detectedActions?.length > 0 && (
+                    <div className="results-section">
+                      <h4 className="results-label">Detected Actions</h4>
+                      <div className="chip-row">
+                        {analysisData.detectedActions.map((action, idx) => (
+                          <span key={idx} className="result-chip">
+                            {action}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {analysisData.detectedTargets?.length > 0 && (
+                    <div className="results-section">
+                      <h4 className="results-label">Detected Targets</h4>
+                      <div className="chip-row">
+                        {analysisData.detectedTargets.map((target, idx) => (
+                          <span key={idx} className="result-chip">
+                            {target}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-            <div className="results-section">
-              <h4 className="results-label">Pattern Matches</h4>
-              {patterns.length === 0 ? (
-                <p className="results-text muted">
-                  No override patterns detected.
-                </p>
-              ) : (
-                <ul className="pattern-list">
-                  {patterns.map((p) => (
-                    <li key={p}>{p}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
+
+              <div className="results-section">
+                <div className="results-raw-header">
+                  <h4 className="results-label">Raw Analysis Payload</h4>
+                  <button
+                    type="button"
+                    className="results-raw-toggle"
+                    onClick={() => setShowRawAnalysis((v) => !v)}
+                  >
+                    {showRawAnalysis ? "Hide" : "Show"}
+                  </button>
+                </div>
+                {showRawAnalysis && (
+                  <pre className="results-raw-block">
+                    {JSON.stringify(activeRecord?.analysis || {}, null, 2)}
+                  </pre>
+                )}
+              </div>
+            </>
+          )}
         </section>
 
         {/* Analysis history */}
@@ -667,17 +394,19 @@ function App() {
           ) : (
             <div className="history-table">
               {filteredRecords.slice(0, 50).map((record) => {
-                const r = computeRisk(record.analysis || "");
+                const data = getAnalysisData(record);
+                const rScore = data?.threatScore ?? 0;
+                const rLevel = data?.threatLevel || "SAFE";
                 const chipClass =
-                  r.level === "HIGH"
+                  rLevel === "HIGH"
                     ? "row-chip high"
-                    : r.level === "MEDIUM"
+                    : rLevel === "MEDIUM"
                     ? "row-chip medium"
                     : "row-chip safe";
                 const summary =
-                  (record.user_input || "").length > 80
-                    ? `${record.user_input.slice(0, 80)}…`
-                    : record.user_input || "(empty prompt)";
+                  (record.prompt || "").length > 80
+                    ? `${record.prompt.slice(0, 80)}…`
+                    : record.prompt || "(empty prompt)";
 
                 return (
                   <button
@@ -693,7 +422,7 @@ function App() {
                     </div>
                     <div className="history-row-meta">
                       <span className={chipClass}>
-                        Score {r.score} · {r.level}
+                        Score {rScore.toFixed(1)} · {rLevel}
                       </span>
                       {record.created_at && (
                         <span className="history-timestamp">
@@ -721,4 +450,3 @@ function App() {
 }
 
 export default App;
-
